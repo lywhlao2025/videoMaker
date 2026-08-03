@@ -254,75 +254,53 @@ div[class*="st-key-advanced_settings_"] div[data-testid="stExpanderDetails"] {
 /* 任务管理 popover 需要固定宽度，避免内容从空状态、列表状态切换时
    反复改变宽度造成页面抖动。宽度仍保留视口约束，兼容窄屏。 */
 div[data-testid="stPopoverBody"] {
-    width: min(860px, calc(100vw - 48px)) !important;
-    max-width: min(860px, calc(100vw - 48px)) !important;
+    width: min(960px, calc(100vw - 48px)) !important;
+    max-width: min(960px, calc(100vw - 48px)) !important;
 }
 
 div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] {
     width: 100% !important;
 }
 
-/* 任务管理列表保留 Streamlit 原生布局，只做轻量压缩，避免每一行过高。
-   通过 task_row_ key 限定作用范围，避免影响其它配置面板的 container。 */
+/* SaaS 风格任务卡片：内容分层展示，操作区保持横向且文字不换行。 */
 div[class*="st-key-task_row_"] {
-    margin-bottom: 0.18rem !important;
+    margin-bottom: 0.75rem !important;
 }
 
 div[class*="st-key-task_row_"] div[data-testid="stVerticalBlockBorderWrapper"] {
-    padding: 0.18rem 0.6rem !important;
-}
-
-div[class*="st-key-task_row_"] div[data-testid="stElementContainer"],
-div[class*="st-key-task_row_"] div[data-testid="stMarkdown"] {
-    margin-bottom: 0 !important;
-}
-
-div[class*="st-key-task_row_"] div[data-testid="stMarkdown"] {
-    display: flex !important;
-    align-items: center !important;
-    min-height: 1.75rem !important;
-}
-
-div[class*="st-key-task_row_"] div[data-testid="stMarkdownContainer"] {
-    display: flex !important;
-    align-items: center !important;
-    margin-bottom: 0 !important;
+    padding: 0.85rem 1rem !important;
+    border-radius: 0.8rem !important;
 }
 
 div[class*="st-key-task_row_"] p {
-    margin-bottom: 0 !important;
-    line-height: 1.25 !important;
+    line-height: 1.45 !important;
 }
 
-div[class*="st-key-task_row_"] button[kind="secondary"] {
-    position: relative !important;
-    min-height: 1.75rem !important;
-    height: 1.75rem !important;
-    padding: 0.1rem 0.3rem !important;
+div[class*="st-key-task_action_bar_"] {
+    margin-top: 0.45rem !important;
 }
 
-/* 按钮文字视觉隐藏后，Streamlit 仍会保留图标与文字之间的默认间距，导致
-   单独图标向左偏移。清除该间距并让内容层占满按钮，确保操作图标严格居中。 */
-div[class*="st-key-task_row_"]
-    button[kind="secondary"]
-    span[data-has-shortcut] {
-    width: 100% !important;
-    gap: 0 !important;
-    justify-content: center !important;
+div[class*="st-key-task_action_bar_"] button,
+div[class*="st-key-task_action_bar_"] a {
+    min-height: 2.35rem !important;
+    height: auto !important;
+    padding: 0.35rem 0.65rem !important;
 }
 
-/* 行内操作保留可访问的按钮名称，但视觉上只显示图标。使用屏幕阅读器可见的
-   隐藏方式，而不是 display:none，确保每个操作仍能被正确朗读。 */
-div[class*="st-key-task_row_"] button[kind="secondary"] p {
-    position: absolute !important;
-    width: 1px !important;
-    height: 1px !important;
-    padding: 0 !important;
-    margin: -1px !important;
-    overflow: hidden !important;
-    clip: rect(0, 0, 0, 0) !important;
-    clip-path: inset(50%) !important;
+div[class*="st-key-task_action_bar_"] button p,
+div[class*="st-key-task_action_bar_"] a p {
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    clip: auto !important;
+    clip-path: none !important;
     white-space: nowrap !important;
+}
+
+div[class*="st-key-task_action_bar_"] span[data-has-shortcut] {
+    justify-content: center !important;
 }
 
 
@@ -353,87 +331,16 @@ div[class*="st-key-task_row_"] button[kind="secondary"] p {
     }
 }
 
-/* 移动端隐藏桌面表头，并将任务行重排为“主题 + 元信息 + 操作”紧凑结构。 */
+/* 移动端把四个操作改成 2×2，卡片内容仍保持自然文档流。 */
 @media (max-width: 700px) {
-    div[class*="st-key-task_table_header_"] {
-        display: none !important;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"] {
-        display: grid !important;
-        grid-template-columns: auto minmax(0, 1fr) auto auto;
-        gap: 0.2rem 0.5rem !important;
-        align-items: center !important;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"] {
-        width: auto !important;
-        min-width: 0 !important;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(1) {
-        grid-column: 1;
-        grid-row: 2;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(2) {
-        grid-column: 2;
-        grid-row: 2;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(3) {
-        grid-column: 1 / 4;
-        grid-row: 1;
-        font-weight: 600;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(4) {
-        grid-column: 3;
-        grid-row: 2;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(5) {
-        grid-column: 4;
-        grid-row: 1 / 3;
-    }
-
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(5)
-        div[data-testid="stHorizontalBlock"] {
-        display: flex !important;
-        flex-direction: row !important;
+    div[class*="st-key-task_action_bar_"] div[data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
         gap: 0.15rem !important;
     }
 
-    div[class*="st-key-task_row_"]
-        > div[data-testid="stLayoutWrapper"]
-        > div[data-testid="stHorizontalBlock"]
-        > div[data-testid="stColumn"]:nth-child(5)
-        div[data-testid="stColumn"] {
-        flex: 1 1 0 !important;
-        width: auto !important;
-        min-width: 1.75rem !important;
+    div[class*="st-key-task_action_bar_"] div[data-testid="stColumn"] {
+        flex: 1 1 calc(50% - 0.2rem) !important;
+        width: calc(50% - 0.2rem) !important;
+        min-width: calc(50% - 0.2rem) !important;
     }
 }

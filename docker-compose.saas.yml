@@ -1,0 +1,36 @@
+services:
+  webui:
+    image: ghcr.io/harry0703/moneyprinterturbo:latest
+    container_name: moneyprinterturbo-webui
+    command:
+      - streamlit
+      - run
+      - ./webui/Main.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.baseUrlPath=video
+      - --browser.serverAddress=${PUBLIC_HOST:-lywhlao2025.top}
+      - --browser.serverPort=443
+      - --server.enableCORS=true
+      - --browser.gatherUsageStats=false
+      - --client.toolbarMode=minimal
+      - --logger.hideWelcomeMessage=true
+      - --server.showEmailPrompt=false
+    ports:
+      - 127.0.0.1:8501:8501
+    volumes:
+      - ./config.toml:/MoneyPrinterTurbo/config.toml
+      - ./storage:/MoneyPrinterTurbo/storage
+      - ./webui/Main.py:/MoneyPrinterTurbo/webui/Main.py:ro
+      - ./webui/styles.css:/MoneyPrinterTurbo/webui/styles.css:ro
+      - ./webui/i18n/zh.json:/MoneyPrinterTurbo/webui/i18n/zh.json:ro
+      - ./webui/i18n/en.json:/MoneyPrinterTurbo/webui/i18n/en.json:ro
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 1200m
+    memswap_limit: 2048m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

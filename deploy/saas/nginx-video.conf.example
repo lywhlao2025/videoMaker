@@ -1,0 +1,42 @@
+# Include these locations in the HTTPS server block for your domain.
+# Replace CHANGE_ME_SHARED_SSO_COOKIE_VALUE before enabling the file.
+
+location = /site-nav.js {
+    alias /var/www/site-nav/site-nav.js;
+    default_type application/javascript;
+    charset utf-8;
+    charset_types application/javascript;
+    add_header Cache-Control "public, max-age=300";
+}
+
+location ~ "^/video-download/([0-9a-fA-F-]{36})/(final-[0-9]+\.(?:mp4|mov|mkv|webm))$" {
+    if ($cookie_codex_chat_auth != "CHANGE_ME_SHARED_SSO_COOKIE_VALUE") { return 302 /chat-login; }
+    alias /opt/moneyprinterturbo/storage/tasks/$1/$2;
+    default_type application/octet-stream;
+    add_header Content-Disposition 'attachment; filename="$2"' always;
+    add_header X-Content-Type-Options nosniff always;
+}
+
+location = /video {
+    if ($cookie_codex_chat_auth != "CHANGE_ME_SHARED_SSO_COOKIE_VALUE") { return 302 /chat-login; }
+    return 301 /video/;
+}
+
+location ^~ /video/ {
+    if ($cookie_codex_chat_auth != "CHANGE_ME_SHARED_SSO_COOKIE_VALUE") { return 302 /chat-login; }
+    client_max_body_size 2g;
+    proxy_pass http://127.0.0.1:8501;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+    proxy_buffering off;
+    proxy_set_header Accept-Encoding "";
+    sub_filter_once on;
+    sub_filter '</body>' '<script src="/site-nav.js"></script></body>';
+}

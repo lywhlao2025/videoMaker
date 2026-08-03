@@ -292,6 +292,33 @@ def _safe_load_task_script(task_path):
         return {}
 
 
+def _normalize_task_terms(value):
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _extract_task_history_details(script_data):
+    """提取适合历史任务卡片展示的稳定字段。"""
+    script_data = script_data if isinstance(script_data, Mapping) else {}
+    params = script_data.get("params")
+    params = params if isinstance(params, Mapping) else {}
+    return {
+        "script": str(
+            params.get("video_script") or script_data.get("script") or ""
+        ).strip(),
+        "terms": _normalize_task_terms(
+            params.get("video_terms") or script_data.get("search_terms")
+        ),
+        "script_prompt": str(params.get("video_script_prompt") or "").strip(),
+        "system_prompt": str(params.get("custom_system_prompt") or "").strip(),
+        "video_source": str(params.get("video_source") or "").strip(),
+        "video_aspect": str(params.get("video_aspect") or "").strip(),
+        "voice_name": str(params.get("voice_name") or "").strip(),
+        "subtitle_enabled": params.get("subtitle_enabled"),
+    }
+
+
 def _find_final_task_video(task_path: str) -> str:
     """
     返回任务目录中序号最小的最终成片。
@@ -480,6 +507,7 @@ def _scan_history_tasks(limit=30):
     for mtime, name, task_path in task_entries[:limit]:
         script_data = _safe_load_task_script(task_path)
         params_data = script_data.get("params", {}) if script_data else {}
+        history_details = _extract_task_history_details(script_data)
         video_file = _find_final_task_video(task_path)
         subject = (
             params_data.get("video_subject")
@@ -496,6 +524,7 @@ def _scan_history_tasks(limit=30):
                 "task_path": task_path,
                 "video_file": video_file,
                 "source": "history",
+                **history_details,
             }
         )
 
@@ -530,6 +559,7 @@ def _collect_task_summaries(limit=20):
         )
 
         history_tasks[task_id] = {
+            **history_task,
             "task_id": task_id,
             "subject": subject,
             "state": task.get("state"),
@@ -555,6 +585,7 @@ def _collect_task_summaries(limit=20):
 
         task_path = os.path.join(utils.task_dir(), task_id)
         history_tasks[task_id] = {
+            **history_task,
             "task_id": task_id,
             "subject": active_task.get("subject")
             or history_task.get("subject")
@@ -572,38 +603,37 @@ def _collect_task_summaries(limit=20):
     return sorted(tasks, key=lambda item: item["mtime"], reverse=True)[:limit]
 
 
-def _open_task_path(task_path):
-    tasks_root = os.path.abspath(utils.task_dir())
-    normalized_path = os.path.abspath(task_path)
-    if not normalized_path.startswith(tasks_root + os.sep):
-        logger.warning(f"invalid task folder path: {normalized_path}")
-        return
-    if os.path.isdir(normalized_path):
-        webbrowser.open(f"file://{normalized_path}")
-
-
-def _open_task_video(video_file):
+def _build_task_video_download_url(task_id, video_file):
+    """为最终成片生成经过 Nginx 鉴权的浏览器下载地址。"""
     tasks_root = os.path.abspath(utils.task_dir())
     normalized_file = os.path.abspath(video_file)
-
-    # 视频路径来自任务目录扫描或运行期状态。这里仍然限制只能打开任务目录
-    # 内的文件，避免 UI 操作被异常路径扩展成任意本地文件打开能力。
     if not normalized_file.startswith(tasks_root + os.sep):
-        logger.warning(f"invalid task video path: {normalized_file}")
-        return
+        logger.warning(f"invalid task video path for download: {normalized_file}")
+        return ""
     if not os.path.isfile(normalized_file):
         logger.warning(f"task video does not exist: {normalized_file}")
-        return
+        return ""
 
     try:
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", normalized_file])
-        elif sys.platform.startswith("win"):
-            os.startfile(normalized_file)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", normalized_file])
-    except Exception as e:
-        logger.error(f"failed to open task video: {normalized_file}, {e}")
+        normalized_task_id = str(UUID(str(task_id)))
+    except (TypeError, ValueError, AttributeError):
+        logger.warning(f"invalid task id for download: {task_id}")
+        return ""
+
+    file_name = os.path.basename(normalized_file)
+    if not _FINAL_VIDEO_PATTERN.fullmatch(file_name):
+        logger.warning(f"invalid final video file for download: {file_name}")
+        return ""
+
+    expected_parent = os.path.join(tasks_root, normalized_task_id)
+    if os.path.dirname(normalized_file) != expected_parent:
+        logger.warning(
+            f"task video does not belong to task: task_id={normalized_task_id}, "
+            f"video={normalized_file}"
+        )
+        return ""
+
+    return f"/video-download/{normalized_task_id}/{file_name}"
 
 
 def _delete_task(task_id, task_path, task_state=None):
@@ -665,20 +695,20 @@ def _task_manager_label(processing_count):
 
 
 def _render_task_table(filtered_tasks, key_prefix):
-    with st.container(key=f"task_table_header_{key_prefix}"):
-        header_cols = st.columns([1.1, 1.7, 3.0, 0.8, 1.6], vertical_alignment="center")
-        header_cols[0].caption(tr("Task Status"))
-        header_cols[1].caption(tr("Task Updated At"))
-        header_cols[2].caption(tr("Task Subject"))
-        header_cols[3].caption(tr("Task Progress"))
-        header_cols[4].caption(tr("Task Actions"))
-
     if not filtered_tasks:
         st.info(tr("No Tasks Match Filter"))
         return
 
     visible_tasks = filtered_tasks[:12]
-    list_height = min(390, max(96, len(visible_tasks) * 58))
+    st.caption(tr("Task List Count").format(count=len(filtered_tasks)))
+    preview_task_id = st.session_state.get("task_preview_id", "")
+    has_visible_preview = any(
+        task["task_id"] == preview_task_id for task in visible_tasks
+    )
+    list_height = min(
+        760,
+        max(180, len(visible_tasks) * 190 + (330 if has_visible_preview else 0)),
+    )
     with st.container(height=list_height, border=False):
         for task in visible_tasks:
             task_id = task["task_id"]
@@ -690,79 +720,205 @@ def _render_task_table(filtered_tasks, key_prefix):
             )
             safe_task_key = "".join(ch if ch.isalnum() else "_" for ch in task_id)[:40]
 
-            # 使用 Streamlit 原生 bordered container + columns 保留每行操作。
-            # 相比自定义 HTML/CSS 表格，这种方式对 Streamlit 版本变更更稳；
-            # 相比 dataframe，又能保留播放、打开目录、删除等行内动作。
+            download_url = (
+                _build_task_video_download_url(task_id, task["video_file"])
+                if has_video
+                else ""
+            )
+            status_label = _task_state_label(task["state"], has_video)
+            progress = max(0, min(100, int(task.get("progress", 0) or 0)))
+            subject = str(task.get("subject") or "").strip() or "-"
+            script = str(task.get("script") or "").strip()
+            terms = str(task.get("terms") or "").strip()
+            script_preview = _format_task_subject(script, max_length=150)
+
+            # 历史记录使用 SaaS 风格信息卡片：关键信息直接可见，完整提示词与
+            # 配置按需展开，操作区独占整行，避免按钮标签被压成竖排。
             with st.container(
                 key=f"task_row_{key_prefix}_{safe_task_key}", border=True
             ):
-                row_cols = st.columns(
-                    [1.1, 1.7, 3.0, 0.8, 1.6],
-                    vertical_alignment="center",
+                status_col, time_col, progress_col = st.columns(
+                    [1.0, 1.9, 2.2], vertical_alignment="center"
                 )
-                row_cols[0].write(_task_state_label(task["state"], has_video))
-                row_cols[1].write(_format_task_time(task["mtime"]))
-                row_cols[2].write(_format_task_subject(task["subject"]))
-                row_cols[3].write(f"{task['progress']}%")
-
-                action_cols = row_cols[4].columns(
-                    4,
-                    vertical_alignment="center",
-                    gap="small",
+                status_col.markdown(f"**{status_label}**")
+                time_col.caption(
+                    f"{tr('Task Updated At')} · {_format_task_time(task['mtime'])}"
                 )
-                with action_cols[0]:
-                    play_label = tr("Play")
-                    if st.button(
-                        play_label,
-                        key=f"play_task_{key_prefix}_{task_id}",
-                        use_container_width=True,
-                        icon=":material/play_arrow:",
-                        help=play_label,
-                        disabled=not has_video,
-                    ):
-                        _open_task_video(task["video_file"])
+                progress_col.progress(
+                    progress,
+                    text=f"{tr('Task Progress')} {progress}%",
+                )
 
-                with action_cols[1]:
-                    open_label = tr("Open Task Folder")
-                    if st.button(
-                        open_label,
-                        key=f"open_task_{key_prefix}_{task_id}",
-                        use_container_width=True,
-                        icon=":material/folder_open:",
-                        help=open_label,
-                    ):
-                        _open_task_path(task["task_path"])
+                st.markdown(f"**{tr('Task Topic')}**")
+                st.write(subject)
 
-                with action_cols[2]:
-                    restore_label = tr("Regenerate Task")
-                    if st.button(
-                        restore_label,
-                        key=f"restore_task_{key_prefix}_{task_id}",
-                        use_container_width=True,
-                        icon=":material/replay:",
-                        help=restore_label,
-                        disabled=is_processing or not has_restore_data,
-                    ):
-                        _queue_task_restore(task_id)
+                st.markdown(f"**{tr('Task Script Preview')}**")
+                st.write(script_preview if script else tr("Not Set"))
+                if terms:
+                    st.caption(f"{tr('Task Keywords')} · {_format_task_subject(terms, 130)}")
 
-                with action_cols[3]:
-                    delete_label = tr("Delete Task")
-                    delete_help = (
-                        f"{delete_label} ({tr('Task Status Processing')})"
-                        if is_busy
-                        else delete_label
+                with st.expander(tr("Task Details"), expanded=False):
+                    st.markdown(f"**{tr('Task Topic')}**")
+                    st.write(subject)
+                    st.markdown(f"**{tr('Task Full Script')}**")
+                    st.write(script or tr("Not Set"))
+
+                    if terms:
+                        st.markdown(f"**{tr('Task Keywords')}**")
+                        st.write(terms)
+                    if task.get("script_prompt"):
+                        st.markdown(f"**{tr('Task Custom Prompt')}**")
+                        st.write(task["script_prompt"])
+                    if task.get("system_prompt"):
+                        st.markdown(f"**{tr('Task System Prompt')}**")
+                        st.write(task["system_prompt"])
+
+                    st.markdown(f"**{tr('Task Configuration')}**")
+                    config_parts = []
+                    if task.get("video_source"):
+                        config_parts.append(
+                            f"{tr('Task Source')}: {task['video_source']}"
+                        )
+                    if task.get("video_aspect"):
+                        config_parts.append(
+                            f"{tr('Task Aspect')}: {task['video_aspect']}"
+                        )
+                    if task.get("voice_name"):
+                        config_parts.append(
+                            f"{tr('Task Voice')}: {task['voice_name']}"
+                        )
+                    if task.get("subtitle_enabled") is not None:
+                        subtitle_value = (
+                            tr("Enabled")
+                            if task.get("subtitle_enabled")
+                            else tr("Disabled")
+                        )
+                        config_parts.append(
+                            f"{tr('Task Subtitle')}: {subtitle_value}"
+                        )
+                    st.caption(" · ".join(config_parts) or tr("Not Set"))
+                    st.caption(f"Task ID · {task_id}")
+
+                with st.container(
+                    key=f"task_action_bar_{key_prefix}_{safe_task_key}"
+                ):
+                    action_cols = st.columns(
+                        4,
+                        vertical_alignment="center",
+                        gap="small",
                     )
-                    if st.button(
-                        delete_label,
-                        key=f"delete_task_{key_prefix}_{task_id}",
-                        use_container_width=True,
-                        icon=":material/delete:",
-                        help=delete_help,
-                        disabled=is_busy,
+                    with action_cols[0]:
+                        preview_label = tr("Preview Video")
+                        if st.button(
+                            preview_label,
+                            key=f"play_task_{key_prefix}_{task_id}",
+                            use_container_width=True,
+                            icon=":material/play_arrow:",
+                            help=preview_label,
+                            disabled=not has_video,
+                        ):
+                            current_preview = st.session_state.get(
+                                "task_preview_id", ""
+                            )
+                            st.session_state["task_preview_id"] = (
+                                "" if current_preview == task_id else task_id
+                            )
+                            st.rerun(scope="fragment")
+
+                    with action_cols[1]:
+                        download_label = tr("Download Video")
+                        if download_url:
+                            st.link_button(
+                                download_label,
+                                download_url,
+                                use_container_width=True,
+                                icon=":material/download:",
+                                help=download_label,
+                            )
+                        else:
+                            st.button(
+                                download_label,
+                                key=f"download_task_{key_prefix}_{task_id}",
+                                use_container_width=True,
+                                icon=":material/download:",
+                                help=download_label,
+                                disabled=True,
+                            )
+
+                    with action_cols[2]:
+                        restore_label = tr("Regenerate Task")
+                        if st.button(
+                            restore_label,
+                            key=f"restore_task_{key_prefix}_{task_id}",
+                            use_container_width=True,
+                            icon=":material/replay:",
+                            help=restore_label,
+                            disabled=is_processing or not has_restore_data,
+                        ):
+                            _queue_task_restore(task_id)
+
+                    with action_cols[3]:
+                        delete_label = tr("Delete Task")
+                        delete_help = (
+                            f"{delete_label} ({tr('Task Status Processing')})"
+                            if is_busy
+                            else delete_label
+                        )
+                        if st.button(
+                            delete_label,
+                            key=f"delete_task_{key_prefix}_{task_id}",
+                            use_container_width=True,
+                            icon=":material/delete:",
+                            help=delete_help,
+                            disabled=is_busy,
+                        ):
+                            st.session_state["task_delete_candidate_id"] = task_id
+                            st.rerun(scope="fragment")
+
+                if preview_task_id == task_id and has_video:
+                    with st.container(
+                        key=f"task_preview_{key_prefix}_{safe_task_key}",
+                        border=True,
                     ):
+                        st.video(task["video_file"])
+                        try:
+                            size_mb = os.path.getsize(task["video_file"]) / (1024 * 1024)
+                            st.caption(
+                                f"{os.path.basename(task['video_file'])} · {size_mb:.1f} MB"
+                            )
+                        except OSError:
+                            pass
+                        if st.button(
+                            tr("Close Preview"),
+                            key=f"close_preview_{key_prefix}_{task_id}",
+                            icon=":material/close:",
+                        ):
+                            st.session_state.pop("task_preview_id", None)
+                            st.rerun(scope="fragment")
+
+                if st.session_state.get("task_delete_candidate_id") == task_id:
+                    st.warning(tr("Delete Task Confirmation"))
+                    cancel_col, confirm_col = st.columns(2)
+                    if cancel_col.button(
+                        tr("Cancel"),
+                        key=f"cancel_delete_{key_prefix}_{task_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.pop("task_delete_candidate_id", None)
+                        st.rerun(scope="fragment")
+                    if confirm_col.button(
+                        tr("Confirm Delete Task"),
+                        key=f"confirm_delete_{key_prefix}_{task_id}",
+                        type="primary",
+                        use_container_width=True,
+                        icon=":material/delete_forever:",
+                    ):
+                        st.session_state.pop("task_delete_candidate_id", None)
                         if _delete_task(task_id, task["task_path"], task["state"]):
+                            if st.session_state.get("task_preview_id") == task_id:
+                                st.session_state.pop("task_preview_id", None)
                             st.toast(tr("Task Deleted"))
-                            st.rerun()
+                            st.rerun(scope="fragment")
                         else:
                             st.error(tr("Task Delete Failed"))
 
@@ -1382,10 +1538,9 @@ def _render_generation_task_snapshot(task_id, task):
 
     _render_generation_logs(task_id)
     if st.session_state.get("opened_generation_task_id") != task_id:
-        # 原同步流程会在生成完成后自动打开任务目录。Fragment 可能重复运行，
-        # 因此用会话标记保证每个任务只打开一次，避免连续弹出 Finder/资源管理器。
+        # SaaS 部署不能在服务器上打开 Finder/资源管理器。成片直接在网页中预览，
+        # 历史任务可从任务管理面板继续预览或下载。
         st.session_state["opened_generation_task_id"] = task_id
-        open_task_folder(task_id)
         logger.info(f"{tr('Video Generation Completed')}: task_id={task_id}")
 
 
