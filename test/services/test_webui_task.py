@@ -1,7 +1,5 @@
 import ast
 import re
-import threading
-import time
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
@@ -54,64 +52,52 @@ def test_generation_controls_submit_background_task_instead_of_blocking_page():
     assert "tm.start" not in calls
 
 
-def test_submit_generation_returns_while_pipeline_is_still_running():
-    """后台流水线未结束时，提交函数必须已经返回，让 Streamlit 完成本次渲染。"""
-    task_id = "background-submit-test"
-    started = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
-
-    def blocking_start(**_kwargs):
-        started.set()
-        release.wait(timeout=5)
-        finished.set()
-        return {"videos": ["/tmp/final-1.mp4"]}
-
+def test_submit_generation_returns_without_running_pipeline_in_webui(tmp_path):
+    """WebUI 只负责持久化任务，流水线必须由独立 worker 进程执行。"""
+    task_id = "2a9e9314-771a-4057-b3de-490a870ad7b1"
     params = VideoParams(video_subject="异步生成测试")
-    try:
-        with (
-            patch.object(webui_task.tm, "start", side_effect=blocking_start),
-            patch.object(
-                webui_task.config,
-                "runtime_config_lock",
-                return_value=nullcontext(),
-            ),
-        ):
-            started_at = time.monotonic()
-            webui_task.submit_generation(task_id, params, capture_logs=False)
-            elapsed = time.monotonic() - started_at
+    with (
+        patch.object(webui_task, "_job_root", return_value=str(tmp_path)),
+        patch.object(webui_task.tm, "start") as start,
+    ):
+        webui_task.submit_generation(task_id, params, capture_logs=False)
 
-            assert started.wait(timeout=2)
-            assert elapsed < 0.5
-            assert not finished.is_set()
-            task = webui_task.sm.state.get_task(task_id)
-            assert task["state"] == const.TASK_STATE_PROCESSING
-    finally:
-        release.set()
-        assert finished.wait(timeout=2)
-        webui_task.sm.state.delete_task(task_id)
+    start.assert_not_called()
+    assert (tmp_path / "pending" / f"{task_id}.pkl").is_file()
+    webui_task.sm.state.delete_task(task_id)
 
 
-def test_submit_generation_copies_params_before_starting_worker():
-    """页面后续 rerun 或流水线内部修改参数时，不能反向污染当前表单对象。"""
+def test_submit_generation_copies_params_before_persisting_worker_job(tmp_path):
+    """页面后续 rerun 不能反向污染已经落盘的 worker 参数。"""
+    from app.services import webui_worker
+
     params = VideoParams(video_subject="参数隔离测试")
-    with patch.object(webui_task._task_manager, "add_task") as add_task:
-        webui_task.submit_generation("copied-params-test", params, capture_logs=False)
+    task_id = "5987bc40-ad65-48c9-8f62-d6aa5bf50c80"
+    with (
+        patch.object(webui_task, "_job_root", return_value=str(tmp_path)),
+        patch.object(webui_worker, "write_job") as write_job,
+    ):
+        webui_task.submit_generation(task_id, params, capture_logs=False)
 
-    submitted_params = add_task.call_args.kwargs["params"]
+    submitted_params = write_job.call_args.args[1]["params"]
     assert submitted_params == params
     assert submitted_params is not params
-    webui_task.sm.state.delete_task("copied-params-test")
+    webui_task.sm.state.delete_task(task_id)
 
 
-def test_scheduling_failure_is_saved_as_terminal_task_state():
-    """队列或线程启动失败时不能让任务管理器永久停留在“生成中”。"""
-    task_id = "scheduling-failure-test"
+def test_scheduling_failure_is_saved_as_terminal_task_state(tmp_path):
+    """队列文件写入失败时不能让任务管理器永久停留在“生成中”。"""
+    from app.services import webui_worker
+
+    task_id = "e65bfb3b-6f87-4195-98d0-0af9dc4b0881"
     params = VideoParams(video_subject="调度失败测试")
-    with patch.object(
-        webui_task._task_manager,
-        "add_task",
-        side_effect=RuntimeError("worker unavailable"),
+    with (
+        patch.object(webui_task, "_job_root", return_value=str(tmp_path)),
+        patch.object(
+            webui_worker,
+            "write_job",
+            side_effect=RuntimeError("worker unavailable"),
+        ),
     ):
         with pytest.raises(RuntimeError, match="worker unavailable"):
             webui_task.submit_generation(task_id, params, capture_logs=False)
@@ -123,11 +109,10 @@ def test_scheduling_failure_is_saved_as_terminal_task_state():
     webui_task.sm.state.delete_task(task_id)
 
 
-def test_worker_logs_are_available_without_streamlit_session_state():
-    """后台日志写入线程安全缓存，页面只需轮询快照即可恢复实时日志。"""
-    task_id = "captured-log-test"
-    with webui_task._task_logs_lock:
-        webui_task._task_logs.pop(task_id, None)
+def test_worker_logs_are_available_without_streamlit_session_state(tmp_path):
+    """后台日志写入任务文件，页面重连后只需读取磁盘快照。"""
+    task_id = "a0dbdd3f-e4ae-4653-aa72-98d67d5e3fb3"
+    task_log = tmp_path / "task.log"
 
     def logged_start(**_kwargs):
         logger.info("unique background task log")
@@ -140,21 +125,23 @@ def test_worker_logs_are_available_without_streamlit_session_state():
             "runtime_config_lock",
             return_value=nullcontext(),
         ),
+        patch.object(webui_task, "task_log_path", return_value=str(task_log)),
     ):
         result = webui_task._run_generation(
             task_id,
             VideoParams(video_subject="日志测试"),
             capture_logs=True,
         )
+        records = webui_task.get_task_logs(task_id)
 
     assert result == {"videos": ["/tmp/final-1.mp4"]}
-    records = webui_task.get_task_logs(task_id)
-    assert len(records) == 1
+    assert len(records) == 3
     assert re.fullmatch(
+        rf"\[task_id={task_id}\] "
         r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| INFO \| "
         r'"\./test/services/test_webui_task\.py:\d+": logged_start '
         r"- unique background task log",
-        records[0],
+        records[1],
     )
 
 

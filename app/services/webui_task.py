@@ -1,52 +1,67 @@
+import os
 import threading
 from collections import deque
+from datetime import datetime
 
 from loguru import logger
 
 from app.config import config
-from app.controllers.manager.memory_manager import InMemoryTaskManager
+from app.controllers.manager.base_manager import TaskQueueFullError
 from app.models import const
 from app.models.schema import VideoParams
 from app.services import state as sm
 from app.services import task as tm
+from app.utils import utils
 from app.utils.logging_utils import format_log_record
 
 
-# WebUI 的配置保存在进程级全局字典中。原来的同步实现会在完整生成期间持有
-# runtime_config_lock，因此不同浏览器会话实际上也是串行执行。这里把并发数固定
-# 为 1，既延续原有配置一致性，也避免多个线程只是在配置锁外无意义地等待。
-_task_manager = InMemoryTaskManager(
-    max_concurrent_tasks=1,
-    max_queued_tasks=max(1, int(config.app.get("max_queued_tasks", 100))),
-)
-_task_logs: dict[str, deque[str]] = {}
 _task_logs_lock = threading.RLock()
-_MAX_LOG_TASKS = 20
 _MAX_LOG_RECORDS_PER_TASK = 1000
 # Streamlit 无法由后台线程直接推送组件更新，只能通过 Fragment 轮询。0.5 秒
 # 足以让 WebUI 日志接近终端实时输出，又不会像高频刷新那样持续占用浏览器资源。
 TASK_LOG_REFRESH_INTERVAL_SECONDS = 0.5
 
 
+def _job_root() -> str:
+    configured_root = os.getenv("MPT_WEBUI_JOB_ROOT", "").strip()
+    if configured_root:
+        os.makedirs(configured_root, exist_ok=True)
+        return os.path.realpath(configured_root)
+    return utils.storage_dir("webui_jobs", create=True)
+
+
+def task_log_path(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "task.log")
+
+
 def _append_task_log(task_id: str, message: str) -> None:
-    """按任务保存有限数量的日志，供 Streamlit Fragment 安全轮询。"""
+    """把日志追加到任务目录，页面断开或进程重启后仍可读取。"""
+    normalized_message = message.rstrip()
+    if not normalized_message:
+        return
+
+    log_path = task_log_path(task_id)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
     with _task_logs_lock:
-        records = _task_logs.get(task_id)
-        if records is None:
-            # 只保留最近任务的日志，避免 WebUI 服务长时间运行后持续占用内存。
-            # dict 保持插入顺序；任务日志仅用于界面诊断，淘汰最早记录不影响任务。
-            if len(_task_logs) >= _MAX_LOG_TASKS:
-                oldest_task_id = next(iter(_task_logs))
-                _task_logs.pop(oldest_task_id, None)
-            records = deque(maxlen=_MAX_LOG_RECORDS_PER_TASK)
-            _task_logs[task_id] = records
-        records.append(message.rstrip())
+        with open(log_path, mode="a", encoding="utf-8") as handle:
+            for line in normalized_message.splitlines():
+                handle.write(f"[task_id={task_id}] {line}\n")
+            handle.flush()
 
 
-def get_task_logs(task_id: str) -> list[str]:
-    """返回日志快照，避免页面渲染期间持有后台线程使用的锁。"""
+def get_task_logs(
+    task_id: str,
+    limit: int = _MAX_LOG_RECORDS_PER_TASK,
+) -> list[str]:
+    """从任务日志尾部返回有限快照，避免大日志拖慢页面。"""
+    log_path = task_log_path(task_id)
+    if not os.path.isfile(log_path):
+        return []
+
+    bounded_limit = max(1, min(int(limit), _MAX_LOG_RECORDS_PER_TASK))
     with _task_logs_lock:
-        return list(_task_logs.get(task_id, ()))
+        with open(log_path, mode="r", encoding="utf-8", errors="replace") as handle:
+            return [line.rstrip("\n") for line in deque(handle, maxlen=bounded_limit)]
 
 
 def _run_generation(
@@ -65,6 +80,11 @@ def _run_generation(
     log_handler_id = None
     worker_thread_id = threading.get_ident()
     try:
+        _append_task_log(
+            task_id,
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | INFO | "
+            "background worker - task started",
+        )
         if capture_logs:
             log_handler_id = logger.add(
                 lambda message: _append_task_log(task_id, str(message)),
@@ -77,11 +97,17 @@ def _run_generation(
         # 完整任务仍使用原来的配置锁，防止另一个 WebUI 会话在生成中途修改
         # Provider、密钥等进程级配置，造成同一条视频前后使用不同设置。
         with config.runtime_config_lock():
-            return tm.start(
+            result = tm.start(
                 task_id=task_id,
                 params=params,
                 voice_preview=voice_preview,
             )
+        _append_task_log(
+            task_id,
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | INFO | "
+            "background worker - task finished",
+        )
+        return result
     except Exception as exc:
         # tm.start 已负责把流水线异常转换成失败状态；这里额外保护日志 sink、
         # 配置锁等 WebUI 包装层。任何后台线程异常都必须留下终态，不能让任务
@@ -105,6 +131,11 @@ def _run_generation(
             f"unexpected WebUI generation worker failure, "
             f"task_id={task_id}, error={exc}"
         )
+        _append_task_log(
+            task_id,
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | ERROR | "
+            f"background worker - {error}",
+        )
         return failure
     finally:
         if log_handler_id is not None:
@@ -123,10 +154,11 @@ def submit_generation(
     voice_preview: dict | None = None,
 ) -> None:
     """
-    登记并提交 WebUI 视频生成任务，调用后立即返回。
+    持久化 WebUI 视频生成任务，调用后立即返回。
 
-    任务状态必须在线程启动前写入。这样页面本次脚本执行结束时即可查询到任务，
-    浏览器刷新或 WebSocket 重连也不依赖旧页面内存中的占位符。
+    任务状态和队列文件都必须在页面本次脚本执行结束前落盘。独立 worker 服务
+    随后领取任务，因此浏览器关闭、WebSocket 断开和 Streamlit rerun 都不会
+    终止流水线。
     """
     task_params = params.model_copy(deep=True)
     # 预览载荷只包含不可变音频路径、参数快照和只读字幕时间轴。复制外层字典，
@@ -137,14 +169,41 @@ def submit_generation(
         state=const.TASK_STATE_PROCESSING,
         progress=0,
         video_subject=task_params.video_subject or task_params.video_script or task_id,
+        submitted_at=datetime.now().isoformat(timespec="seconds"),
+        log_file=task_log_path(task_id),
     )
     try:
-        _task_manager.add_task(
-            _run_generation,
-            task_id=task_id,
-            params=task_params,
-            capture_logs=capture_logs,
-            voice_preview=voice_preview_snapshot,
+        from app.services import webui_worker
+
+        job_root = _job_root()
+        pending_dir = os.path.join(job_root, "pending")
+        running_dir = os.path.join(job_root, "running")
+        os.makedirs(pending_dir, exist_ok=True)
+        os.makedirs(running_dir, exist_ok=True)
+        queued_count = sum(
+            1
+            for directory in (pending_dir, running_dir)
+            for name in os.listdir(directory)
+            if name.endswith(".pkl")
+        )
+        max_queued_tasks = max(1, int(config.app.get("max_queued_tasks", 100)))
+        if queued_count >= max_queued_tasks:
+            raise TaskQueueFullError("task queue is full, please try again later")
+
+        job_path = os.path.join(pending_dir, f"{task_id}.pkl")
+        webui_worker.write_job(
+            job_path,
+            {
+                "task_id": task_id,
+                "params": task_params,
+                "capture_logs": capture_logs,
+                "voice_preview": voice_preview_snapshot,
+            },
+        )
+        _append_task_log(
+            task_id,
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | INFO | "
+            "webui - task queued for background worker",
         )
     except Exception as exc:
         # 调度失败与流水线失败一样必须成为可查询状态，避免任务管理器永久显示

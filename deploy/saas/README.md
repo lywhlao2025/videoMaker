@@ -5,8 +5,8 @@ service. Runtime secrets and generated data are intentionally excluded.
 
 ## Files
 
-- `../../docker-compose.saas.yml`: Streamlit `/video` base path, resource limits,
-  persistent storage, and source overrides.
+- `../../docker-compose.saas.yml`: Streamlit `/video` service plus an independent
+  durable worker, SQLite task state, resource limits, and source overrides.
 - `nginx-video.conf.example`: authenticated reverse proxy and protected downloads.
 - `site-nav.js`: shared Chat/Video navigation injected by Nginx.
 
@@ -23,6 +23,11 @@ service. Runtime secrets and generated data are intentionally excluded.
    ```bash
    docker compose -f docker-compose.saas.yml up -d
    ```
+
+The WebUI writes jobs to `storage/webui_jobs/pending`. The worker claims them in
+a separate container, so closing the browser does not cancel generation. Task
+state is shared through `storage/task_state.sqlite3`, and every task writes a
+persistent `storage/tasks/<task-id>/task.log` file.
 
 Do not commit `config.toml`, `storage/`, TLS private keys, or authentication
 cookie values.

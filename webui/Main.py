@@ -6,7 +6,6 @@ import mimetypes
 import os
 import re
 import shutil
-import subprocess
 import sys
 import webbrowser
 from collections.abc import Mapping
@@ -748,6 +747,7 @@ def _render_task_table(filtered_tasks, key_prefix):
                     progress,
                     text=f"{tr('Task Progress')} {progress}%",
                 )
+                st.caption(f"{tr('Task ID')} · `{task_id}`")
 
                 st.markdown(f"**{tr('Task Topic')}**")
                 st.write(subject)
@@ -797,7 +797,10 @@ def _render_task_table(filtered_tasks, key_prefix):
                             f"{tr('Task Subtitle')}: {subtitle_value}"
                         )
                     st.caption(" · ".join(config_parts) or tr("Not Set"))
-                    st.caption(f"Task ID · {task_id}")
+                    task_logs = webui_task.get_task_logs(task_id, limit=120)
+                    if task_logs:
+                        st.markdown(f"**{tr('Task Logs')}**")
+                        st.code("\n".join(task_logs), language="text")
 
                 with st.container(
                     key=f"task_action_bar_{key_prefix}_{safe_task_key}"

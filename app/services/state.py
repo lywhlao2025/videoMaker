@@ -1,10 +1,15 @@
 import ast
 import copy
+import json
+import os
+import sqlite3
 import threading
+import time
 from abc import ABC, abstractmethod
 
 from app.config import config
 from app.models import const
+from app.utils import utils
 
 
 _PATCH_EXISTING_TASK_SCRIPT = """
@@ -92,6 +97,143 @@ class MemoryState(BaseState):
     def delete_task(self, task_id: str):
         with self._lock:
             self._tasks.pop(task_id, None)
+
+
+class SQLiteState(BaseState):
+    """跨线程、跨进程共享的轻量任务状态存储。"""
+
+    def __init__(self, database_path: str):
+        self.database_path = os.path.realpath(database_path)
+        os.makedirs(os.path.dirname(self.database_path), exist_ok=True)
+        with self._connect() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_states (
+                    task_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+
+    def _connect(self):
+        return sqlite3.connect(self.database_path, timeout=30)
+
+    @staticmethod
+    def _serialize(task: dict) -> str:
+        return json.dumps(
+            task,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=lambda value: (
+                value.model_dump(mode="json")
+                if hasattr(value, "model_dump")
+                else str(value)
+            ),
+        )
+
+    @staticmethod
+    def _deserialize(payload: str) -> dict:
+        value = json.loads(payload)
+        return value if isinstance(value, dict) else {}
+
+    def get_all_tasks(self, page: int, page_size: int):
+        offset = max(0, (page - 1) * page_size)
+        with self._connect() as connection:
+            total = int(
+                connection.execute("SELECT COUNT(*) FROM task_states").fetchone()[0]
+            )
+            rows = connection.execute(
+                """
+                SELECT payload
+                FROM task_states
+                ORDER BY updated_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (page_size, offset),
+            ).fetchall()
+        return [self._deserialize(row[0]) for row in rows], total
+
+    def update_task(
+        self,
+        task_id: str,
+        state: int = const.TASK_STATE_PROCESSING,
+        progress: int = 0,
+        **kwargs,
+    ):
+        progress = max(0, min(100, int(progress)))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM task_states WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            task = self._deserialize(row[0]) if row else {}
+            # 流水线每个阶段只提交本阶段字段。跨进程持久化时必须保留提交时间、
+            # 主题和日志路径，否则 worker 的第一次进度更新会抹掉 WebUI 元数据。
+            task.update(
+                {
+                    "task_id": task_id,
+                    "state": state,
+                    "progress": progress,
+                    **kwargs,
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO task_states(task_id, payload, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (task_id, self._serialize(task), time.time()),
+            )
+            connection.commit()
+
+    def get_task(self, task_id: str):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM task_states WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._deserialize(row[0]) if row else None
+
+    def patch_task(self, task_id: str, **kwargs) -> bool:
+        if not kwargs:
+            return False
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM task_states WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                return False
+
+            task = self._deserialize(row[0])
+            task.update(copy.deepcopy(kwargs))
+            connection.execute(
+                """
+                UPDATE task_states
+                SET payload = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (self._serialize(task), time.time(), task_id),
+            )
+            connection.commit()
+        return True
+
+    def delete_task(self, task_id: str):
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM task_states WHERE task_id = ?",
+                (task_id,),
+            )
 
 
 # Redis state management
@@ -234,11 +376,23 @@ _redis_host = config.app.get("redis_host", "localhost")
 _redis_port = config.app.get("redis_port", 6379)
 _redis_db = config.app.get("redis_db", 0)
 _redis_password = config.app.get("redis_password", None)
+_state_backend = os.getenv(
+    "MPT_STATE_BACKEND",
+    str(config.app.get("state_backend", "memory")),
+).strip().lower()
+_sqlite_database_path = os.getenv(
+    "MPT_STATE_DB",
+    os.path.join(utils.storage_dir(create=True), "task_state.sqlite3"),
+)
 
 state = (
     RedisState(
         host=_redis_host, port=_redis_port, db=_redis_db, password=_redis_password
     )
     if _enable_redis
-    else MemoryState()
+    else (
+        SQLiteState(_sqlite_database_path)
+        if _state_backend == "sqlite"
+        else MemoryState()
+    )
 )
