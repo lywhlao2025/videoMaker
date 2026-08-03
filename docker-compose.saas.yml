@@ -22,6 +22,8 @@ services:
       MPT_STATE_BACKEND: sqlite
       MPT_STATE_DB: /MoneyPrinterTurbo/storage/task_state.sqlite3
       MPT_WEBUI_JOB_ROOT: /MoneyPrinterTurbo/storage/webui_jobs
+      MPT_PIPELINE_DB: /MoneyPrinterTurbo/storage/pipeline.sqlite3
+      MPT_PIPELINE_ARTIFACT_ROOT: /MoneyPrinterTurbo/storage/projects
     volumes:
       - ./config.toml:/MoneyPrinterTurbo/config.toml
       - ./storage:/MoneyPrinterTurbo/storage
@@ -32,6 +34,7 @@ services:
       - ./app/services/state.py:/MoneyPrinterTurbo/app/services/state.py:ro
       - ./app/services/webui_task.py:/MoneyPrinterTurbo/app/services/webui_task.py:ro
       - ./app/services/webui_worker.py:/MoneyPrinterTurbo/app/services/webui_worker.py:ro
+      - ./app/pipeline:/MoneyPrinterTurbo/app/pipeline:ro
     restart: unless-stopped
     cpus: 1.0
     mem_limit: 512m
@@ -54,12 +57,15 @@ services:
       MPT_STATE_BACKEND: sqlite
       MPT_STATE_DB: /MoneyPrinterTurbo/storage/task_state.sqlite3
       MPT_WEBUI_JOB_ROOT: /MoneyPrinterTurbo/storage/webui_jobs
+      MPT_PIPELINE_DB: /MoneyPrinterTurbo/storage/pipeline.sqlite3
+      MPT_PIPELINE_ARTIFACT_ROOT: /MoneyPrinterTurbo/storage/projects
     volumes:
       - ./config.toml:/MoneyPrinterTurbo/config.toml:ro
       - ./storage:/MoneyPrinterTurbo/storage
       - ./app/services/state.py:/MoneyPrinterTurbo/app/services/state.py:ro
       - ./app/services/webui_task.py:/MoneyPrinterTurbo/app/services/webui_task.py:ro
       - ./app/services/webui_worker.py:/MoneyPrinterTurbo/app/services/webui_worker.py:ro
+      - ./app/pipeline:/MoneyPrinterTurbo/app/pipeline:ro
     restart: unless-stopped
     cpus: 1.0
     mem_limit: 1200m

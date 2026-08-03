@@ -96,12 +96,17 @@ def execute_job_file(
     job_path: str,
     run_generation: Callable | None = None,
 ):
+    job = load_job(job_path)
+    if run_generation is None and job.get("job_type") == "quality_pipeline":
+        from app.pipeline.worker import execute_pipeline_job
+
+        return execute_pipeline_job(job)
+
     if run_generation is None:
         from app.services import webui_task
 
         run_generation = webui_task._run_generation
 
-    job = load_job(job_path)
     return run_generation(
         task_id=job["task_id"],
         params=job["params"],
@@ -112,10 +117,17 @@ def execute_job_file(
 
 def _mark_worker_process_failed(job_path: str, return_code: int) -> None:
     try:
+        job = load_job(job_path)
+        if job.get("job_type") == "quality_pipeline":
+            from app.pipeline.worker import mark_pipeline_job_failed
+
+            mark_pipeline_job_failed(job, return_code)
+            return
+
         from app.models import const
         from app.services import state as sm
 
-        task_id = load_job(job_path)["task_id"]
+        task_id = job["task_id"]
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_FAILED,

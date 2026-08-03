@@ -27,6 +27,9 @@ sys.path.insert(0, root_dir)
 
 from app.config import config
 from app.models import const
+from app.pipeline import webui as quality_webui
+from app.pipeline.domain import ContentTheme
+from app.pipeline.runtime import get_pipeline
 from app.models.llm_provider import (
     DEFAULT_LLM_PROVIDER_ID,
     LLM_PROVIDER_REGISTRY,
@@ -247,6 +250,7 @@ def _initialize_session_state():
         # 最近一次从当前页面提交的任务。生成改为后台执行后，页面 Fragment
         # 通过这个 ID 查询状态；刷新时不再依赖正在执行的旧页面脚本。
         "current_generation_task_id": "",
+        "workspace_mode": "quick",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -4064,12 +4068,198 @@ def _render_generation_controls(
     return start_button
 
 
+def _quality_theme_label(theme):
+    labels = {
+        ContentTheme.motivational.value: tr("Theme Motivational"),
+        ContentTheme.comedy.value: tr("Theme Comedy"),
+        ContentTheme.contrast.value: tr("Theme Contrast"),
+    }
+    return labels.get(str(theme), str(theme))
+
+
+def _quality_status_label(status):
+    labels = {
+        "draft": tr("Pipeline Status Draft"),
+        "running": tr("Pipeline Status Running"),
+        "script_approved": tr("Pipeline Status Script Approved"),
+        "review_required": tr("Pipeline Status Review Required"),
+        "failed": tr("Pipeline Status Failed"),
+    }
+    return labels.get(str(status), str(status))
+
+
+@st.fragment(run_every="3s")
+def _render_quality_project_list():
+    try:
+        pipeline = get_pipeline()
+        projects = pipeline.list_projects(limit=20)
+    except Exception as exc:
+        logger.exception(f"failed to load quality projects: {exc}")
+        st.error(tr("Quality Projects Load Failed"))
+        return
+
+    st.subheader(tr("Quality Projects"))
+    if not projects:
+        st.info(tr("No Quality Projects"))
+        return
+
+    for project in projects:
+        snapshot = pipeline.get_project(project.project_id)
+        if snapshot is None:
+            continue
+        latest_run = snapshot.runs[0] if snapshot.runs else None
+        candidates = (
+            [
+                candidate
+                for candidate in snapshot.candidates
+                if latest_run and candidate.run_id == latest_run.run_id
+            ]
+            if latest_run
+            else []
+        )
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if latest_run
+                and candidate.candidate_id == latest_run.selected_candidate_id
+            ),
+            None,
+        )
+        best_score = max(
+            (candidate.scorecard.overall_score for candidate in candidates),
+            default=0,
+        )
+        with st.container(border=True):
+            title_col, status_col, score_col = st.columns([2.4, 1.2, 1.0])
+            title_col.markdown(f"**{html.escape(project.title)}**")
+            title_col.caption(
+                f"{tr('Project ID')} · `{project.project_id}` · "
+                f"{_quality_theme_label(project.theme.value)}"
+            )
+            status_col.metric(
+                tr("Pipeline Status"),
+                _quality_status_label(project.status.value),
+            )
+            score_col.metric(tr("Script Score"), f"{best_score:.1f}")
+            st.write(project.topic)
+            if latest_run:
+                st.caption(
+                    f"{tr('Pipeline Stage')} · {latest_run.current_stage.value} · "
+                    f"{tr('Candidate Versions')} {len(candidates)}"
+                )
+                if latest_run.error:
+                    st.error(latest_run.error)
+
+            with st.expander(tr("View Quality Report")):
+                if latest_run and latest_run.brief:
+                    st.markdown(f"**{tr('Content Brief')}**")
+                    st.write(latest_run.brief.core_message)
+                    st.caption(
+                        f"{latest_run.brief.angle} · "
+                        f"{' → '.join(latest_run.brief.emotion_curve)}"
+                    )
+                for candidate in candidates:
+                    st.markdown(
+                        f"**v{candidate.version} · "
+                        f"{candidate.scorecard.overall_score:.1f} / 100**"
+                    )
+                    st.write(candidate.script.narration)
+                    for dimension in sorted(
+                        candidate.scorecard.dimensions,
+                        key=lambda item: item.score,
+                    )[:3]:
+                        st.caption(
+                            f"{dimension.name}: {dimension.score:.0f} · "
+                            f"{dimension.action or tr('Not Set')}"
+                        )
+                    if candidate.revision:
+                        st.info(
+                            f"{tr('Revision Reason')}: {candidate.revision.reason}"
+                        )
+                if selected:
+                    st.success(
+                        f"{tr('Selected Candidate')} · v{selected.version} · "
+                        f"{selected.scorecard.overall_score:.1f}"
+                    )
+
+
+def _render_quality_pipeline_workspace():
+    st.title(tr("Quality Pipeline"))
+    st.caption(tr("Quality Pipeline Description"))
+    with st.form("quality_pipeline_project_form", border=True):
+        title = st.text_input(tr("Project Title"), max_chars=200)
+        topic = st.text_input(tr("Content Topic"), max_chars=500)
+        source_content = st.text_area(
+            tr("Raw Content"),
+            height=180,
+            max_chars=20000,
+        )
+        col_theme, col_audience, col_duration = st.columns([1, 1.5, 1])
+        theme = col_theme.selectbox(
+            tr("Content Theme"),
+            options=[theme.value for theme in ContentTheme],
+            format_func=_quality_theme_label,
+        )
+        audience = col_audience.text_input(
+            tr("Target Audience"),
+            value=tr("Default Target Audience"),
+            max_chars=500,
+        )
+        duration = col_duration.slider(
+            tr("Target Duration"),
+            min_value=30,
+            max_value=90,
+            value=55,
+            step=5,
+        )
+        submitted = st.form_submit_button(
+            tr("Start Quality Pipeline"),
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if not title.strip() or not topic.strip():
+            st.error(tr("Project Title and Topic Required"))
+        else:
+            try:
+                project, _run = quality_webui.create_and_submit_project(
+                    title=title,
+                    topic=topic,
+                    source_content=source_content,
+                    theme=theme,
+                    target_audience=audience,
+                    target_duration_seconds=duration,
+                )
+                st.session_state["current_quality_project_id"] = project.project_id
+                st.success(tr("Quality Project Submitted"))
+            except Exception as exc:
+                logger.exception(f"failed to submit quality project: {exc}")
+                st.error(tr("Quality Project Submit Failed"))
+
+    _render_quality_project_list()
+
+
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
+
+    workspace_mode = st.segmented_control(
+        tr("Workspace Mode"),
+        options=["quality", "quick"],
+        format_func=lambda value: (
+            tr("Quality Pipeline") if value == "quality" else tr("Quick Video")
+        ),
+        key="workspace_mode",
+        label_visibility="collapsed",
+    )
+    if workspace_mode == "quality":
+        _render_quality_pipeline_workspace()
+        return
 
     restore_applied = _apply_pending_task_restore()
     restore_candidate_id = st.session_state.get("task_restore_candidate_id")

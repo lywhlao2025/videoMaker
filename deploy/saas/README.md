@@ -29,5 +29,10 @@ a separate container, so closing the browser does not cancel generation. Task
 state is shared through `storage/task_state.sqlite3`, and every task writes a
 persistent `storage/tasks/<task-id>/task.log` file.
 
+The high-quality workflow stores Project/Run/Candidate metadata in
+`storage/pipeline.sqlite3` and immutable stage artifacts under
+`storage/projects/<project-id>/runs/<run-id>`. Script scoring and revision jobs
+use the same durable worker queue as video rendering jobs.
+
 Do not commit `config.toml`, `storage/`, TLS private keys, or authentication
 cookie values.
