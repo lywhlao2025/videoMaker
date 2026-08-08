@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "enabled": true,
+  "mode": "http_status_allowlist",
+  "switchHttpStatuses": [408, 499, 500, 502, 503, 504, 521, 522, 523, 524, 529],
+  "failoverReason": "timeout"
+}
